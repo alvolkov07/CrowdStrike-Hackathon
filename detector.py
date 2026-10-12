@@ -1,13 +1,16 @@
 """
-AIT alert dataset -> Detector agent -> Explainer agent
+AIT alert dataset -> Detector agent -> short summary of what looks suspicious
 
 Usage:
   pip install -r requirements.txt
   python detector.py --aminer Data/ait_ads/fox_aminer.json \
-         --wazuh Data/ait_ads/fox_wazuh.json --out out/ \
-         --labels Data/labels.csv --scenario fox
+         --wazuh Data/ait_ads/fox_wazuh.json --out out/
 
-labels.csv is used ONLY for evaluation, never shown to the agents.
+The command line now only prints/writes a SUMMARY of what could be wrong (per log file / source),
+instead of per-event flags, CSVs and evaluation. The lower-level functions below (load_events,
+score_events, cluster_events, detector_agent, explainer_agent, evaluate, call_json, ...) keep
+their original names and signatures because app.py imports and uses them.
+
 Requires `pip install llama-cpp-python huggingface_hub`. The ~3.8 GB model is downloaded
 and cached on the first LLM request.
 """
@@ -175,6 +178,17 @@ Respond with JSON only, no prose or code fences:
 {"suspicious": bool, "confidence": 0-1, "attack_stage": str|null,
  "false_positive_factors": [str], "evidence_event_ids": [str], "rationale": str}"""
 
+def _extract_json(txt):
+    """Parse model output; tolerate code fences or stray prose around the JSON object."""
+    txt = txt.strip()
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", txt, re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
 def call_json(system, user, max_tokens=1200):
     resp = get_client().create_chat_completion(
         messages=[
@@ -186,9 +200,10 @@ def call_json(system, user, max_tokens=1200):
     txt = resp["choices"][0]["message"]["content"]
     if not txt:
         raise ValueError(f"{MODEL} returned an empty response")
-    return json.loads(txt)
+    return _extract_json(txt)
 
 def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=300):
+    # Kept for app.py (it expects event-level flags + per-cluster verdicts).
     df = score_events(df)
     df = cluster_events(df)
     verdicts = {}
@@ -207,7 +222,7 @@ def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=300):
     df["reason"] = df.cluster.map({c: v["rationale"][:200] for c, v in sus.items()}).fillna("").where(df.suspicious, "")
     return df, verdicts
 
-#EXPLAINER AGENT: summarize + rank
+# EXPLAINER AGENT (kept for app.py; the command line no longer uses it)
 
 EXPLAINER_SYSTEM = """You are an incident-response analyst. You receive suspicious
 alert clusters already triaged by a detector agent. Group related clusters into
@@ -237,7 +252,7 @@ def explainer_agent(df, verdicts):
     return call_json(EXPLAINER_SYSTEM, json.dumps(payload[:60]), max_tokens=4000)
 
 
-# eval against labels.csv (not seen by agents)
+# eval against labels.csv (kept for app.py; not run from the command line any more)
 
 def evaluate(df, labels_path, scenario):
     lab = pd.read_csv(labels_path)
@@ -254,24 +269,120 @@ def evaluate(df, labels_path, scenario):
     return dict(precision=p, recall=r_, f1=2 * p * r_ / max(p + r_, 1e-9),
                 tp=int(tp), fp=int(fp), fn=int(fn))
 
+
+# SUMMARY MODE: only report what could be suspicious, and what the problem is
+
+def _iso(ts):
+    return datetime.fromtimestamp(float(ts), timezone.utc).isoformat()
+
+def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=300, source_files=None):
+    """Score + cluster + LLM-triage, then return a compact summary of suspicious activity.
+    A bad model reply on one cluster is recorded as a note instead of crashing the run.
+    No event-level flags, CSVs or label evaluation are produced."""
+    source_files = source_files or {}
+    df = score_events(df)
+    df = cluster_events(df)
+    summ = df.groupby("cluster").score.agg(["max", "mean", "size"])
+    to_review = summ[summ["max"] >= auto_benign_below].sort_values("max", ascending=False)
+
+    findings, notes = [], []
+    reviewed = 0
+    for cid in to_review.index[:max_llm_clusters]:
+        g = df[df.cluster == cid]
+        brief = cluster_brief(g)
+        try:
+            v = call_json(DETECTOR_SYSTEM, json.dumps(brief))
+            if not isinstance(v, dict):
+                raise ValueError("reply was not a JSON object")
+        except Exception as e:
+            notes.append(f"Cluster {int(cid)} ({brief['time_start']}): model reply unusable "
+                         f"({type(e).__name__}: {str(e)[:100]})")
+            continue
+        reviewed += 1
+        sus = v.get("suspicious", False)
+        if isinstance(sus, str):
+            sus = sus.strip().lower() == "true"
+        if not sus:
+            continue
+        try:
+            conf = min(max(float(v.get("confidence", 0.0)), 0.0), 1.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        sources = sorted(brief["sources"])
+        findings.append({
+            "confidence": round(conf, 2),
+            "problem": str(v.get("rationale", "")).strip() or "Model marked this cluster suspicious without a reason.",
+            "attack_stage": v.get("attack_stage"),
+            "time_start": brief["time_start"],
+            "time_end": brief["time_end"],
+            "n_alerts": brief["n_events"],
+            "log_sources": sources,
+            "log_files": sorted({source_files[s] for s in sources if s in source_files}),
+            "hosts": brief["hosts"],
+            "src_ips": brief["src_ips"],
+            "dst_ips": brief["dst_ips"],
+            "mitre": brief["mitre"],
+            "top_alerts": [f"{r['desc']} (x{r['count']})" for r in brief["top_rules"][:3]],
+            "benign_explanations_considered": [str(x) for x in (v.get("false_positive_factors") or [])][:4],
+            "example_event_ids": [str(x) for x in (v.get("evidence_event_ids") or [])][:5],
+        })
+    findings.sort(key=lambda f: f["confidence"], reverse=True)
+
+    total = int(df["count"].sum())
+    if findings:
+        headline = (f"{len(findings)} suspicious cluster(s) found out of {df['cluster'].nunique()} "
+                    f"({reviewed} reviewed, {total:,} raw alerts).")
+    else:
+        headline = (f"No suspicious activity found ({reviewed} cluster(s) reviewed, "
+                    f"{total:,} raw alerts).")
+    if notes:
+        headline += f" {len(notes)} cluster(s) could not be assessed."
+    return {"headline": headline, "findings": findings, "notes": notes}
+
+def format_summary(s):
+    out = [s["headline"], ""]
+    for n, f in enumerate(s["findings"], 1):
+        out.append(f"{n}. [{f['confidence']:.0%}] {f['time_start']} -> {f['time_end']}  "
+                   f"({f['n_alerts']} alerts)")
+        out.append(f"   Problem: {f['problem']}")
+        if f["attack_stage"]:
+            out.append(f"   Stage:   {f['attack_stage']}")
+        where = ", ".join(f["log_files"]) or ", ".join(f["log_sources"])
+        out.append(f"   Logs:    {where}")
+        who = f["hosts"] + f["src_ips"] + f["dst_ips"]
+        if who:
+            out.append(f"   Involves: {', '.join(dict.fromkeys(who))}")
+        if f["mitre"]:
+            out.append(f"   MITRE:   {', '.join(f['mitre'])}")
+        if f["top_alerts"]:
+            out.append(f"   Top alerts: {'; '.join(f['top_alerts'])}")
+        out.append("")
+    for note in s["notes"]:
+        out.append(f"Note: {note}")
+    return "\n".join(out).rstrip()
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--aminer", required=True)
     ap.add_argument("--wazuh", required=True)
     ap.add_argument("--out", default="out")
-    ap.add_argument("--labels"); ap.add_argument("--scenario")
+    ap.add_argument("--labels", help="ignored in summary mode (kept so old commands still work)")
+    ap.add_argument("--scenario", help="ignored in summary mode")
     ap.add_argument("--bucket", type=int, default=10,
                     help="seconds; identical alerts inside one bucket are merged")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
     df = load_events(a.aminer, a.wazuh, a.bucket)
-    df, verdicts = detector_agent(df)
-    df.to_csv(f"{a.out}/flagged_events.csv", index=False)
-
-    report = explainer_agent(df, verdicts)
-    json.dump(report, open(f"{a.out}/incident_report.json", "w"), indent=2)
-
-    if a.labels:
-        print("Eval:", evaluate(df, a.labels, a.scenario))
-    print(report["executive_summary"])
+    summary = summarize_suspicious(df, source_files={
+        "aminer": os.path.basename(a.aminer),
+        "wazuh": os.path.basename(a.wazuh),
+        "suricata": os.path.basename(a.wazuh),   # Suricata alerts arrive inside the Wazuh file
+    })
+    text = format_summary(summary)
+    with open(f"{a.out}/summary.json", "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+    with open(f"{a.out}/summary.txt", "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+    print(text)
