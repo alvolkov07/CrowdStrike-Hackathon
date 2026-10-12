@@ -25,6 +25,39 @@ import pandas as pd  # (for JSON-array files also: pip install ijson)
 MODEL = "Qwen/Qwen2.5-7B-Instruct-GGUF"
 MODEL_FILE = "qwen2.5-7b-instruct-q3_k_m.gguf"
 client: Optional[Llama] = None
+MAX_LLM_CLUSTERS = 6
+ATTACK_TYPES = (
+    "Scans",
+    "Webshell upload",
+    "Password breach",
+    "Privilege breach",
+    "Remote command execution",
+    "Data exfiltration",
+)
+_ATTACK_TYPE_ALIASES = {
+    "scan": "Scans",
+    "scanning": "Scans",
+    "web shell upload": "Webshell upload",
+    "credential breach": "Password breach",
+    "credential compromise": "Password breach",
+    "brute force": "Password breach",
+    "password spraying": "Password breach",
+    "privilege escalation": "Privilege breach",
+    "privilege abuse": "Privilege breach",
+    "rce": "Remote command execution",
+    "remote code execution": "Remote command execution",
+    "exfiltration": "Data exfiltration",
+    "data theft": "Data exfiltration",
+}
+
+
+def normalize_attack_type(value) -> Optional[str]:
+    """Return one of the supported attack labels, or None when it is unknown."""
+    if not isinstance(value, str):
+        return None
+    label = " ".join(value.strip().lower().replace("_", " ").replace("-", " ").split())
+    canonical = {attack.lower(): attack for attack in ATTACK_TYPES}
+    return canonical.get(label) or _ATTACK_TYPE_ALIASES.get(label)
 
 def get_client() -> Llama:
     global client
@@ -172,8 +205,11 @@ DETECTOR_SYSTEM = """You are a SOC triage agent reviewing a cluster of IDS alert
 suspicious. Be skeptical: common false positives include routine admin logins,
 scheduled jobs, package updates, health checks, repeated low-level rules, and
 single-source alerts with no corroboration. Raise confidence when multiple
-independent sources agree, when activity follows an attack progression
-(scan -> exploit -> escalation -> persistence/exfil), or when MITRE tags align.
+independent sources agree or when MITRE tags align. If suspicious, classify the
+primary observed behavior as exactly one of: Scans, Webshell upload, Password
+breach, Privilege breach, Remote command execution, or Data exfiltration. Use
+null only when there is not enough evidence to choose one. Do not invent other
+attack-stage labels.
 Respond with JSON only, no prose or code fences:
 {"suspicious": bool, "confidence": 0-1, "attack_stage": str|null,
  "false_positive_factors": [str], "evidence_event_ids": [str], "rationale": str}"""
@@ -202,7 +238,7 @@ def call_json(system, user, max_tokens=1200):
         raise ValueError(f"{MODEL} returned an empty response")
     return _extract_json(txt)
 
-def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=1):
+def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=MAX_LLM_CLUSTERS):
     # Kept for app.py (it expects event-level flags + per-cluster verdicts).
     df = score_events(df)
     df = cluster_events(df)
@@ -212,7 +248,10 @@ def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=1):
     to_review = summ[summ["max"] >= auto_benign_below].sort_values("max", ascending=False)
     for cid in to_review.index[:max_llm_clusters]:
         g = df[df.cluster == cid]
-        verdicts[cid] = call_json(DETECTOR_SYSTEM, json.dumps(cluster_brief(g)))
+        verdict = call_json(DETECTOR_SYSTEM, json.dumps(cluster_brief(g)))
+        if isinstance(verdict, dict):
+            verdict["attack_stage"] = normalize_attack_type(verdict.get("attack_stage"))
+        verdicts[cid] = verdict
     # Event-level flags: inherit cluster verdict, require the event itself to matter
     sus = {c: v for c, v in verdicts.items() if v["suspicious"]}
     evidence = {e for v in sus.values() for e in v["evidence_event_ids"]}
@@ -229,7 +268,10 @@ alert clusters already triaged by a detector agent. Group related clusters into
 incidents if they plausibly belong to one attack chain. For each incident write a
 short plain-English explanation (what happened, which hosts/IPs, which stage of
 the attack, why it is believed malicious) and rank incidents by priority
-(severity x confidence x breadth). Cite evidence only by the event IDs provided.
+(severity x confidence x breadth). Use exactly one primary attack label from:
+Scans, Webshell upload, Password breach, Privilege breach, Remote command
+execution, or Data exfiltration. Use null if evidence is insufficient. Cite
+evidence only by the event IDs provided.
 Respond with JSON only:
 {"executive_summary": str,
  "incidents": [{"rank": int, "title": str, "severity": "low|medium|high|critical",
@@ -249,7 +291,12 @@ def explainer_agent(df, verdicts):
     payload.sort(key=lambda p: p["verdict"]["confidence"], reverse=True)
     if not payload:
         return {"executive_summary": "No suspicious activity found.", "incidents": []}
-    return call_json(EXPLAINER_SYSTEM, json.dumps(payload[:60]), max_tokens=4000)
+    report = call_json(EXPLAINER_SYSTEM, json.dumps(payload[:60]), max_tokens=4000)
+    if isinstance(report, dict):
+        for incident in report.get("incidents", []):
+            if isinstance(incident, dict):
+                incident["attack_stage"] = normalize_attack_type(incident.get("attack_stage"))
+    return report
 
 
 # eval against labels.csv (kept for app.py; not run from the command line any more)
@@ -275,7 +322,8 @@ def evaluate(df, labels_path, scenario):
 def _iso(ts):
     return datetime.fromtimestamp(float(ts), timezone.utc).isoformat()
 
-def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=1, source_files=None):
+def summarize_suspicious(df, auto_benign_below=0.12,
+                         max_llm_clusters=MAX_LLM_CLUSTERS, source_files=None):
     """Score + cluster + LLM-triage, then return a compact summary of suspicious activity.
     A bad model reply on one cluster is recorded as a note instead of crashing the run.
     No event-level flags, CSVs or label evaluation are produced."""
@@ -304,6 +352,7 @@ def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=1, source_
             sus = sus.strip().lower() == "true"
         if not sus:
             continue
+        attack_stage = normalize_attack_type(v.get("attack_stage"))
         try:
             conf = min(max(float(v.get("confidence", 0.0)), 0.0), 1.0)
         except (TypeError, ValueError):
@@ -312,7 +361,7 @@ def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=1, source_
         findings.append({
             "confidence": round(conf, 2),
             "problem": str(v.get("rationale", "")).strip() or "Model marked this cluster suspicious without a reason.",
-            "attack_stage": v.get("attack_stage"),
+            "attack_stage": attack_stage,
             "time_start": brief["time_start"],
             "time_end": brief["time_end"],
             "n_alerts": brief["n_events"],
