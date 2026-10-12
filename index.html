@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Red Flag Detector</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --cyan:#22f3ff; --pink:#ff2e93; --lime:#a6ff3d; --amber:#ffb020; --bg:#070b14; }
+  body { background: var(--bg); font-family:'Space Grotesk',sans-serif; color:#d7e3f4; }
+  .mono { font-family:'JetBrains Mono',monospace; }
+  .grid-bg {
+    background-image:
+      linear-gradient(rgba(34,243,255,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34,243,255,.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .glow-text { text-shadow: 0 0 18px rgba(34,243,255,.55); }
+  .panel { background: rgba(12,18,32,.85); border:1px solid rgba(34,243,255,.15); border-radius:14px; backdrop-filter: blur(6px); }
+  .panel:hover.hoverable { border-color: rgba(34,243,255,.45); box-shadow: 0 0 24px rgba(34,243,255,.08); }
+
+  /* dropzone */
+  .dz { border:2px dashed rgba(34,243,255,.35); transition: all .2s; }
+  .dz.drag { border-color: var(--lime); background: rgba(166,255,61,.06); box-shadow: 0 0 40px rgba(166,255,61,.15) inset; transform: scale(1.01); }
+
+  /* radar */
+  .radar { position:relative; width:220px; height:220px; border-radius:50%;
+    background:
+      radial-gradient(circle, transparent 0 28%, rgba(34,243,255,.18) 28.5% 29.5%, transparent 30% 58%, rgba(34,243,255,.18) 58.5% 59.5%, transparent 60%),
+      radial-gradient(circle, rgba(34,243,255,.08), transparent 70%);
+    border:2px solid rgba(34,243,255,.5); box-shadow:0 0 40px rgba(34,243,255,.25); overflow:hidden; }
+  .radar::before, .radar::after { content:""; position:absolute; background:rgba(34,243,255,.2); }
+  .radar::before { left:50%; top:0; bottom:0; width:1px; }
+  .radar::after { top:50%; left:0; right:0; height:1px; }
+  .sweep { position:absolute; inset:0; border-radius:50%;
+    background: conic-gradient(from 0deg, rgba(34,243,255,.65), rgba(34,243,255,0) 28%);
+    animation: spin 1.8s linear infinite; }
+  .blip { position:absolute; width:8px; height:8px; border-radius:50%; background:var(--pink);
+    box-shadow:0 0 10px var(--pink); animation: blip 1.8s ease-in-out infinite; }
+  @keyframes spin { to { transform: rotate(360deg);} }
+  @keyframes blip { 0%,100%{opacity:.1; transform:scale(.6)} 50%{opacity:1; transform:scale(1.2)} }
+  .scanline { position:absolute; left:0; right:0; height:2px; background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+    box-shadow:0 0 14px var(--cyan); animation: scan 2.2s ease-in-out infinite; }
+  @keyframes scan { 0%{top:0} 50%{top:100%} 100%{top:0} }
+  .caret::after { content:"▋"; animation: blink 1s steps(2) infinite; color:var(--cyan); }
+  @keyframes blink { 50%{opacity:0} }
+
+  /* reveal */
+  .reveal { animation: rise .55s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes rise { from{opacity:0; transform:translateY(14px)} to{opacity:1; transform:none} }
+
+  /* badges */
+  .badge { font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+    padding:3px 9px; border-radius:999px; border:1px solid; display:inline-block; }
+  .b-critical { color:#ff4d6d; border-color:#ff4d6d; background:rgba(255,77,109,.12); box-shadow:0 0 12px rgba(255,77,109,.35); }
+  .b-high     { color:#ff9a3d; border-color:#ff9a3d; background:rgba(255,154,61,.12); }
+  .b-medium   { color:#ffe14d; border-color:#ffe14d; background:rgba(255,225,77,.10); }
+  .b-low      { color:#4dffb0; border-color:#4dffb0; background:rgba(77,255,176,.10); }
+
+  table.dt th { position:sticky; top:0; background:#0c1424; z-index:1; cursor:pointer; user-select:none; }
+  table.dt tbody tr { border-top:1px solid rgba(255,255,255,.05); }
+  table.dt tbody tr:hover { background:rgba(34,243,255,.05); }
+  ::-webkit-scrollbar{width:8px;height:8px} ::-webkit-scrollbar-thumb{background:#1c2b47;border-radius:8px}
+  .bar { height:8px; border-radius:6px; background:#10192c; overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:6px; transition: width .9s cubic-bezier(.2,.8,.2,1); }
+</style>
+</head>
+<body class="min-h-screen grid-bg">
+<div class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
+
+  <!-- header -->
+  <header class="flex items-center justify-between mb-8 flex-wrap gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl flex items-center justify-center text-2xl"
+           style="background:linear-gradient(135deg,#ff2e93,#22f3ff); box-shadow:0 0 22px rgba(255,46,147,.5)">🚩</div>
+      <div>
+        <h1 class="text-2xl font-bold glow-text tracking-tight">RED FLAG <span style="color:var(--cyan)">DETECTOR</span></h1>
+        <p class="mono text-xs text-slate-400">// local-LLM log triage + anomaly scan</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 mono text-xs">
+      <span id="statusDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+      <span id="statusTxt" class="text-slate-400">checking backend…</span>
+    </div>
+  </header>
+
+  <!-- upload view -->
+  <section id="uploadView" class="reveal">
+    <div class="flex gap-2 mb-4 mono text-xs">
+      <button id="tabAlerts" class="px-4 py-2 rounded-lg border border-cyan-400 text-cyan-300 bg-cyan-400/10">JSON LOG TRIAGE</button>
+      <button id="tabCsv" class="px-4 py-2 rounded-lg border border-white/10 text-slate-400">CSV ANOMALY SCAN</button>
+    </div>
+    <div id="csvMode" class="hidden">
+    <div id="dropzone" class="dz panel p-10 sm:p-16 text-center cursor-pointer">
+      <input id="fileInput" type="file" accept=".csv" class="hidden" />
+      <div class="text-5xl mb-4">📡</div>
+      <h2 class="text-xl sm:text-2xl font-bold mb-2">Drop a CSV here to start the scan</h2>
+      <p class="text-slate-400 mb-6">or click to browse · up to 25 MB · numeric &amp; categorical columns supported</p>
+      <div class="flex justify-center gap-3 flex-wrap">
+        <button class="px-5 py-2.5 rounded-lg font-semibold text-black" style="background:var(--cyan); box-shadow:0 0 18px rgba(34,243,255,.5)">Choose file</button>
+        <button id="sampleBtn" class="px-5 py-2.5 rounded-lg font-semibold border border-cyan-400/40 hover:bg-cyan-400/10">Try demo data</button>
+      </div>
+    </div>
+
+    <div class="panel mt-5 p-5 flex flex-wrap items-center gap-6">
+      <div class="flex-1 min-w-[260px]">
+        <div class="flex justify-between mono text-xs mb-2">
+          <span class="text-slate-400">SENSITIVITY (expected anomaly rate)</span>
+          <span id="sensVal" style="color:var(--cyan)">5%</span>
+        </div>
+        <input id="sens" type="range" min="1" max="20" value="5" class="w-full accent-cyan-400" />
+        <div class="flex justify-between mono text-[10px] text-slate-500 mt-1"><span>strict</span><span>sensitive</span></div>
+      </div>
+      <p class="text-sm text-slate-400 max-w-md">Higher sensitivity flags more rows. ID-like columns are ignored automatically.</p>
+    </div>
+    </div>
+
+    <input id="jsonInput" type="file" multiple accept=".json,.jsonl,.ndjson,.log,.txt" class="hidden" />
+    <div id="alertMode" class="panel p-6 sm:p-8">
+      <div id="jsonDrop" class="dz rounded-xl p-10 sm:p-14 text-center cursor-pointer">
+        <div class="text-5xl mb-4">🗂️</div>
+        <h2 class="text-xl sm:text-2xl font-bold mb-2">Drop JSON log files here</h2>
+        <p class="text-slate-400 mb-6 max-w-xl mx-auto">AMiner, Wazuh, Suricata or any JSON / JSON Lines logs. Add several files at once; the format of each is detected automatically.</p>
+        <button type="button" class="px-5 py-2.5 rounded-lg font-semibold text-black" style="background:var(--cyan); box-shadow:0 0 18px rgba(34,243,255,.5)">Choose files</button>
+      </div>
+      <p id="alertsOff" class="hidden mono text-xs px-3 py-2 mt-4 rounded-lg border border-amber-400/40 bg-amber-400/10 text-amber-300">
+        The backend is missing <b>llama-cpp-python</b> or <b>huggingface_hub</b>. Run: pip install llama-cpp-python huggingface_hub, then restart uvicorn.</p>
+
+      <div id="queueBox" class="hidden mt-6">
+        <div class="flex items-center justify-between mb-2">
+          <span id="queueInfo" class="mono text-xs text-slate-400"></span>
+          <button id="clearQueue" class="mono text-xs text-slate-400 hover:text-white underline underline-offset-4">Clear all</button>
+        </div>
+        <ul id="fileList" class="space-y-2"></ul>
+      </div>
+
+      <details class="mt-6 group">
+        <summary class="mono text-xs text-slate-400 cursor-pointer hover:text-white select-none">Options</summary>
+        <div class="grid md:grid-cols-3 gap-4 mt-4">
+          <label class="block"><span class="mono text-[11px] text-slate-400">Merge identical alerts within (seconds)</span>
+            <input id="bucket" type="number" min="1" max="3600" value="10" class="mt-1 w-full mono text-sm bg-[#0a1020] border border-white/10 rounded-lg px-3 py-2" /></label>
+          <label class="block"><span class="mono text-[11px] text-slate-400">Labels CSV (optional, scoring only)</span>
+            <input id="fLabels" type="file" accept=".csv" class="mt-1 block w-full mono text-xs text-slate-300 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-slate-600 file:text-white" /></label>
+          <label class="block"><span class="mono text-[11px] text-slate-400">Scenario name for labels (e.g. fox)</span>
+            <input id="scenario" placeholder="fox" class="mt-1 w-full mono text-sm bg-[#0a1020] border border-white/10 rounded-lg px-3 py-2" /></label>
+        </div>
+      </details>
+
+      <div class="mt-6 flex items-center gap-4 flex-wrap">
+        <button id="alertBtn" disabled class="px-6 py-3 rounded-lg font-semibold text-black disabled:opacity-40 disabled:cursor-not-allowed" style="background:var(--cyan); box-shadow:0 0 18px rgba(34,243,255,.5)">Analyze files</button>
+        <p class="mono text-[11px] text-slate-500 max-w-xl">Files are analyzed by a local model: nothing leaves this machine. The first run downloads about 3.8 GB, and large files can take a while; progress is shown live.</p>
+      </div>
+    </div>
+
+    <p id="errorBox" class="hidden mt-4 mono text-sm px-4 py-3 rounded-lg border border-red-500/50 bg-red-500/10 text-red-300"></p>
+  </section>
+
+  <!-- scanning view -->
+  <section id="scanView" class="hidden">
+    <div class="panel relative overflow-hidden p-10 flex flex-col items-center text-center">
+      <div class="scanline"></div>
+      <div class="radar mb-8">
+        <div class="sweep"></div>
+        <span class="blip" style="top:24%;left:62%;animation-delay:.1s"></span>
+        <span class="blip" style="top:58%;left:30%;animation-delay:.7s"></span>
+        <span class="blip" style="top:70%;left:68%;animation-delay:1.2s"></span>
+        <span class="blip" style="top:36%;left:22%;animation-delay:1.5s"></span>
+      </div>
+      <h2 id="scanTitle" class="text-2xl font-bold glow-text mb-1">SCAN IN PROGRESS</h2>
+      <p id="scanFile" class="mono text-xs text-slate-400 mb-5"></p>
+      <p id="scanMsg" class="mono text-sm caret" style="color:var(--lime)">initializing…</p>
+      <div class="bar w-full max-w-md mt-6"><i id="scanBar" style="width:0%; background:linear-gradient(90deg,var(--cyan),var(--pink))"></i></div>
+      <p id="scanPct" class="mono text-xs text-slate-400 mt-3"></p>
+      <p id="scanNote" class="mono text-[11px] text-slate-500 mt-1"></p>
+    </div>
+  </section>
+
+  <!-- results view -->
+  <section id="resultView" class="hidden">
+    <div class="flex items-center justify-between flex-wrap gap-3 mb-5 reveal">
+      <div>
+        <h2 class="text-xl font-bold"><span id="resTitle">Scan complete</span> <span id="resFile" class="mono text-sm text-slate-400 font-normal"></span></h2>
+        <p id="resMeta" class="mono text-xs text-slate-500"></p>
+      </div>
+      <div class="flex gap-2">
+        <button id="exportJsonBtn" class="hidden px-4 py-2 rounded-lg border border-cyan-400/40 hover:bg-cyan-400/10 text-sm font-semibold">Export report (JSON)</button>
+        <button id="exportBtn" class="px-4 py-2 rounded-lg border border-cyan-400/40 hover:bg-cyan-400/10 text-sm font-semibold">Export flagged CSV</button>
+        <button id="resetBtn" class="px-4 py-2 rounded-lg text-sm font-semibold text-black" style="background:var(--cyan)">New scan</button>
+      </div>
+    </div>
+
+    <!-- executive summary + incidents (JSON triage mode) -->
+    <div id="incidents" class="hidden mb-5 space-y-4"></div>
+
+    <!-- metric cards -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+      <div class="panel hoverable p-5 reveal" style="animation-delay:.05s">
+        <p id="lTotal" class="mono text-[11px] text-slate-400 tracking-widest">TOTAL SCANNED</p>
+        <p id="mTotal" class="text-4xl font-extrabold mt-2" style="color:var(--cyan)">0</p>
+        <p id="mCols" class="mono text-xs text-slate-500 mt-1"></p>
+      </div>
+      <div class="panel hoverable p-5 reveal" style="animation-delay:.12s">
+        <p id="lFlags" class="mono text-[11px] text-slate-400 tracking-widest">FLAGS DETECTED</p>
+        <p id="mFlags" class="text-4xl font-extrabold mt-2" style="color:var(--pink); text-shadow:0 0 16px rgba(255,46,147,.5)">0</p>
+        <p id="mRate" class="mono text-xs text-slate-500 mt-1"></p>
+      </div>
+      <div class="panel hoverable p-5 reveal" style="animation-delay:.19s">
+        <p id="lAvg" class="mono text-[11px] text-slate-400 tracking-widest">AVG RISK SCORE</p>
+        <p id="mAvg" class="text-4xl font-extrabold mt-2" style="color:var(--amber)">0</p>
+        <p id="mDup" class="mono text-xs text-slate-500 mt-1"></p>
+      </div>
+      <div class="panel hoverable p-5 reveal" style="animation-delay:.26s">
+        <p class="mono text-[11px] text-slate-400 tracking-widest">RISK DISTRIBUTION</p>
+        <div id="dist" class="mt-3 space-y-2"></div>
+      </div>
+    </div>
+
+    <!-- table -->
+    <div class="panel overflow-hidden reveal" style="animation-delay:.33s">
+      <div class="p-4 flex flex-wrap items-center gap-3 border-b border-white/5">
+        <input id="search" placeholder="Search flagged rows…" aria-label="Search flagged rows" class="mono text-sm bg-[#0a1020] border border-white/10 rounded-lg px-3 py-2 w-64 focus:outline-none focus:border-cyan-400/60" />
+        <div id="filters" class="flex gap-2 flex-wrap"></div>
+        <span id="count" class="mono text-xs text-slate-500 ml-auto"></span>
+      </div>
+      <div class="overflow-auto max-h-[560px]">
+        <table class="dt w-full text-sm">
+          <thead>
+            <tr class="text-left mono text-[11px] text-slate-400 tracking-wider">
+              <th id="thRow" class="px-4 py-3" data-k="row">ROW ↕</th>
+              <th class="px-4 py-3" data-k="risk_score">RISK ↕</th>
+              <th class="px-4 py-3" data-k="risk_level">LEVEL</th>
+              <th class="px-4 py-3">WHY IT WAS FLAGGED</th>
+              <th id="thSig" class="px-4 py-3">SIGNALS</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <p id="trunc" class="hidden mono text-xs text-amber-300 p-3 border-t border-white/5"></p>
+    </div>
+  </section>
+</div>
+
+<script>
+// Same-origin when served by FastAPI; override with ?api=http://host:port if opening the file directly.
+const API = new URLSearchParams(location.search).get("api")
+  || (location.protocol === "file:" ? "http://localhost:8000" : "");
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const arr = v => Array.isArray(v) ? v : (v == null || v === "" ? [] : [v]);
+const LEVELS = ["critical","high","medium","low"];
+const COLORS = {critical:"#ff4d6d", high:"#ff9a3d", medium:"#ffe14d", low:"#4dffb0"};
+const sevOf = s => LEVELS.includes(String(s).toLowerCase()) ? String(s).toLowerCase() : "medium";
+const isJsonName = n => /\.(json|jsonl|ndjson|log|txt)$/i.test(n);
+const fmtSize = b => b >= 1048576 ? (b/1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b/1024)) + " KB";
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const MAX_FILES = 20;
+let DATA = null, activeLevel = "all", sortKey = "risk_score", sortDir = -1, lastFileName = "";
+let MODE = "alerts", QUEUE = [], POLL = null;
+
+// ---- backend status
+fetch(API + "/api/health").then(r => r.ok ? r.json() : Promise.reject()).then(h => {
+  ok();
+  if (!h.alerts_available) $("alertsOff").classList.remove("hidden");
+  resumeJob();
+}).catch(bad);
+function ok(){ $("statusDot").style.cssText="background:#4dffb0;box-shadow:0 0 8px #4dffb0"; $("statusTxt").textContent="backend online"; }
+function bad(){ $("statusDot").style.cssText="background:#ff4d6d"; $("statusTxt").textContent="backend offline"; }
+
+async function errText(res) {
+  let d = res.statusText;
+  try { const j = await res.json(); d = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
+  return d;
+}
+const netMsg = e => e.message === "Failed to fetch" ? "Could not reach the backend. Is it running on port 8000?" : e.message;
+
+function show(id){ ["uploadView","scanView","resultView"].forEach(v => $(v).classList.toggle("hidden", v !== id)); }
+function showError(m){ const b=$("errorBox"); b.textContent="⚠ "+m; b.classList.remove("hidden"); show("uploadView"); }
+
+// ---- mode tabs
+function setMode(m) {
+  MODE = m;
+  $("csvMode").classList.toggle("hidden", m !== "csv");
+  $("alertMode").classList.toggle("hidden", m !== "alerts");
+  const on = "border-cyan-400 text-cyan-300 bg-cyan-400/10", off = "border-white/10 text-slate-400";
+  $("tabAlerts").className = "px-4 py-2 rounded-lg border " + (m === "alerts" ? on : off);
+  $("tabCsv").className = "px-4 py-2 rounded-lg border " + (m === "csv" ? on : off);
+}
+$("tabAlerts").onclick = () => setMode("alerts");
+$("tabCsv").onclick = () => setMode("csv");
+
+// ---- drop handling (anything dropped on the page is routed by file type)
+function routeFiles(list) {
+  const files = [...list];
+  const js = files.filter(f => isJsonName(f.name));
+  const csv = files.find(f => /\.csv$/i.test(f.name));
+  if (js.length) { setMode("alerts"); addFiles(js); }
+  else if (csv) { setMode("csv"); startScan(csv); }
+  else if (files.length) showError("Drop .json, .jsonl or .ndjson log files (or a .csv for the anomaly scan).");
+}
+function wireZone(zone, onFiles) {
+  ["dragenter","dragover"].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); zone.classList.add("drag"); }));
+  ["dragleave","drop"].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); zone.classList.remove("drag"); }));
+  zone.addEventListener("drop", e => onFiles(e.dataTransfer.files));
+}
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => {          // dropped outside a zone: don't let the browser open the file
+  e.preventDefault();
+  if (!$("uploadView").classList.contains("hidden")) routeFiles(e.dataTransfer.files);
+});
+
+// ---- JSON queue
+$("jsonDrop").onclick = () => $("jsonInput").click();
+$("jsonInput").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
+wireZone($("jsonDrop"), routeFiles);
+$("clearQueue").onclick = () => { QUEUE = []; drawQueue(); };
+
+async function sniff(file) {
+  // Look at the first 64 KB only, to label what the backend will treat the file as.
+  try {
+    const t = (await file.slice(0, 65536).text()).trimStart();
+    if (!t) return {label: "empty file", warn: true};
+    if (t[0] === "[") return {label: "JSON array"};
+    if (t[0] !== "{") return {label: "not JSON?", warn: true};
+    let o; try { o = JSON.parse(t.split("\n", 1)[0]); } catch { try { o = JSON.parse(t); } catch { return {label: "JSON document"}; } }
+    if (o.LogData || o.AnalysisComponent) return {label: "AMiner alerts", known: true};
+    if (o.rule && typeof o.rule === "object") return {label: "Wazuh alerts", known: true};
+    if (o.alert && o.alert.signature) return {label: "Suricata alerts", known: true};
+    return {label: "generic JSON logs"};
+  } catch { return {label: "unreadable", warn: true}; }
+}
+async function addFiles(list) {
+  $("errorBox").classList.add("hidden");
+  const skipped = [];
+  for (const f of list) {
+    if (!isJsonName(f.name)) { skipped.push(f.name); continue; }
+    if (QUEUE.some(q => q.file.name === f.name && q.file.size === f.size)) continue;
+    if (QUEUE.length >= MAX_FILES) { skipped.push(f.name + " (limit " + MAX_FILES + " files)"); continue; }
+    QUEUE.push({file: f, kind: await sniff(f)});
+  }
+  drawQueue();
+  if (skipped.length) showError("Skipped: " + skipped.join(", ") + ". Only JSON / JSON Lines files can be added here.");
+}
+function drawQueue() {
+  $("queueBox").classList.toggle("hidden", !QUEUE.length);
+  $("alertBtn").disabled = !QUEUE.length;
+  const total = QUEUE.reduce((n, q) => n + q.file.size, 0);
+  $("queueInfo").textContent = `${QUEUE.length} file${QUEUE.length === 1 ? "" : "s"} ready (${fmtSize(total)})`;
+  $("fileList").innerHTML = QUEUE.map((q, i) => `
+    <li class="flex items-center gap-3 px-3 py-2 rounded-lg bg-[#0a1020] border border-white/10">
+      <span class="mono text-sm text-slate-200 truncate flex-1" title="${esc(q.file.name)}">${esc(q.file.name)}</span>
+      <span class="mono text-[11px] px-2 py-0.5 rounded border ${q.kind.known ? "border-cyan-400/40 text-cyan-300" : q.kind.warn ? "border-amber-400/50 text-amber-300" : "border-white/15 text-slate-400"}">${esc(q.kind.label)}</span>
+      <span class="mono text-[11px] text-slate-500 w-16 text-right">${fmtSize(q.file.size)}</span>
+      <button data-rm="${i}" aria-label="Remove ${esc(q.file.name)}" class="text-slate-500 hover:text-pink-400 px-1 text-lg leading-none">×</button>
+    </li>`).join("");
+  document.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { QUEUE.splice(+b.dataset.rm, 1); drawQueue(); });
+}
+$("alertBtn").onclick = startAlerts;
+
+// ---- JSON triage flow: upload -> background job -> poll
+function prepScan(title, fileLine) {
+  $("scanTitle").textContent = title;
+  $("scanFile").textContent = fileLine;
+  $("scanMsg").textContent = "initializing…";
+  $("scanBar").style.width = "0%"; $("scanPct").textContent = ""; $("scanNote").textContent = "";
+  show("scanView");
+}
+function endJob() { clearTimeout(POLL); localStorage.removeItem("redflag_job"); }
+
+async function startAlerts() {
+  if (!QUEUE.length) return;
+  $("errorBox").classList.add("hidden");
+  const fd = new FormData();
+  QUEUE.forEach(q => fd.append("files", q.file, q.file.name));
+  fd.append("bucket", $("bucket").value || "10");
+  fd.append("scenario", $("scenario").value || "");
+  const lf = $("fLabels").files[0]; if (lf) fd.append("labels", lf, lf.name);
+  lastFileName = QUEUE.length === 1 ? QUEUE[0].file.name : QUEUE.length + " files";
+  const total = QUEUE.reduce((n, q) => n + q.file.size, 0);
+  prepScan("ANALYSIS IN PROGRESS", `${lastFileName} · ${fmtSize(total)}`);
+  $("scanMsg").textContent = "uploading files…";
+  try {
+    const res = await fetch(API + "/api/alerts/scan", {method: "POST", body: fd});
+    if (!res.ok) throw new Error(await errText(res));
+    const {job_id} = await res.json();
+    localStorage.setItem("redflag_job", JSON.stringify({id: job_id, name: lastFileName}));
+    poll(job_id);
+  } catch (err) { showError(netMsg(err)); }
+}
+
+function poll(id) {
+  clearTimeout(POLL);
+  const t0 = Date.now(); let fails = 0;
+  const step = async () => {
+    let j;
+    try {
+      const res = await fetch(`${API}/api/alerts/jobs/${id}`);
+      if (res.status === 404) { endJob(); return showError("The server no longer has this analysis (it may have restarted). Add the files and run it again."); }
+      if (!res.ok) throw new Error(res.statusText);
+      j = await res.json(); fails = 0;
+    } catch {
+      if (++fails >= 5) return showError("Lost contact with the backend. The analysis may still be running: reload this page to reconnect.");
+      POLL = setTimeout(step, 3000); return;
+    }
+    $("scanMsg").textContent = j.message || "working…";
+    $("scanBar").style.width = (j.pct || 0) + "%";
+    $("scanPct").textContent = Math.round(j.pct || 0) + "%";
+    const sec = Math.floor((Date.now() - t0) / 1000);
+    $("scanNote").textContent = `elapsed ${Math.floor(sec/60)}m ${String(sec%60).padStart(2,"0")}s` +
+      (j.llm_errors ? ` · ${j.llm_errors} model repl${j.llm_errors === 1 ? "y" : "ies"} could not be read` : "");
+    if (j.status === "done") { endJob(); DATA = j.result; render(); return; }
+    if (j.status === "error") { endJob(); return showError(j.error || "The analysis failed."); }
+    POLL = setTimeout(step, 1500);
+  };
+  step();
+}
+function resumeJob() {                           // reload-safe: reconnect to a running or finished analysis
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("redflag_job") || "null"); } catch {}
+  if (!saved || !saved.id) return;
+  lastFileName = saved.name || "previous analysis";
+  prepScan("ANALYSIS IN PROGRESS", lastFileName + " · reconnected");
+  poll(saved.id);
+}
+
+// ---- CSV flow (unchanged behaviour)
+$("sens").oninput = e => $("sensVal").textContent = e.target.value + "%";
+const dz = $("dropzone");
+dz.onclick = () => $("fileInput").click();
+$("fileInput").onchange = e => { if (e.target.files.length) routeFiles(e.target.files); e.target.value = ""; };
+wireZone(dz, routeFiles);
+$("sampleBtn").onclick = async e => {
+  e.stopPropagation();
+  try {
+    const blob = await (await fetch(API + "/api/sample")).blob();
+    startScan(new File([blob], "sample_transactions.csv", {type:"text/csv"}));
+  } catch { showError("Could not reach the backend. Is it running on port 8000?"); }
+};
+$("resetBtn").onclick = () => { endJob(); show("uploadView"); $("fileInput").value = ""; };
+
+const MSGS = ["parsing dataset","profiling columns","building isolation trees","scoring every row","applying threshold rules","ranking red flags"];
+async function startScan(file) {
+  $("errorBox").classList.add("hidden");
+  if (!file.name.toLowerCase().endsWith(".csv")) return showError("Please upload a .csv file.");
+  lastFileName = file.name;
+  prepScan("SCAN IN PROGRESS", `${file.name} · ${fmtSize(file.size)}`);
+
+  let i = 0, pct = 0;
+  const tick = setInterval(() => {
+    $("scanMsg").textContent = MSGS[i++ % MSGS.length] + "…";
+    pct = Math.min(92, pct + 9 + Math.random()*6); $("scanBar").style.width = pct + "%";
+  }, 650);
+
+  const fd = new FormData(); fd.append("file", file);
+  const started = Date.now();
+  try {
+    const res = await fetch(`${API}/api/scan?contamination=${$("sens").value/100}`, {method:"POST", body:fd});
+    if (!res.ok) throw new Error(await errText(res));
+    DATA = await res.json();
+    const wait = Math.max(0, 2200 - (Date.now() - started));   // let the animation breathe
+    await new Promise(r => setTimeout(r, wait));
+    $("scanBar").style.width = "100%";
+    await new Promise(r => setTimeout(r, 250));
+    clearInterval(tick);
+    render();
+  } catch (err) {
+    clearInterval(tick);
+    showError(netMsg(err));
+  }
+}
+
+// ---- render results
+function countUp(el, to, dec=0) {
+  const t0 = performance.now(), dur = reduceMotion ? 1 : 900;
+  (function f(t){ const p=Math.min(1,(t-t0)/dur), e=1-Math.pow(1-p,3);
+    el.textContent = (to*e).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});
+    if (p<1) requestAnimationFrame(f); })(t0);
+}
+const isAlerts = () => DATA && DATA.mode === "alerts";
+
+function render() {
+  const s = DATA.summary, A = isAlerts();
+  $("resTitle").textContent = A ? "Analysis complete" : "Scan complete";
+  $("resFile").textContent = "· " + lastFileName;
+  $("exportJsonBtn").classList.toggle("hidden", !A);
+  $("thRow").textContent = A ? "#" : "ROW ↕";
+  $("thSig").textContent = A ? "SOURCE" : "SIGNALS";
+  if (A) {
+    $("resMeta").textContent = `${s.scan_seconds}s · ${s.clusters_reviewed} of ${s.clusters_total} time clusters reviewed by the model · ${s.clusters_suspicious} judged suspicious`;
+    $("lTotal").textContent = "RECORDS READ"; $("lFlags").textContent = "FLAGGED ALERTS"; $("lAvg").textContent = "AVG CONFIDENCE";
+    $("mCols").textContent = `${s.aggregated_rows.toLocaleString()} unique after merging duplicates`;
+    $("mRate").textContent = `${s.flagged_raw.toLocaleString()} records · ${s.flag_rate}%`;
+    $("mDup").textContent = `${s.incidents} incident${s.incidents === 1 ? "" : "s"} identified`;
+  } else {
+    $("resMeta").textContent = `${s.scan_seconds}s · contamination ${(s.contamination*100).toFixed(0)}% · skipped: ${s.columns_skipped.join(", ") || "none"}`;
+    $("lTotal").textContent = "TOTAL SCANNED"; $("lFlags").textContent = "FLAGS DETECTED"; $("lAvg").textContent = "AVG RISK SCORE";
+    $("mCols").textContent = `${s.columns_analyzed.length} columns analyzed`;
+    $("mRate").textContent = `${s.flag_rate}% of rows`;
+    $("mDup").textContent = `${s.duplicates} duplicate rows`;
+  }
+  countUp($("mTotal"), s.total_scanned); countUp($("mFlags"), s.flags_detected); countUp($("mAvg"), s.avg_risk_score, 1);
+
+  const max = Math.max(1, ...LEVELS.map(l => s.risk_distribution[l]));
+  $("dist").innerHTML = LEVELS.map(l => `
+    <div class="flex items-center gap-2 mono text-[11px]">
+      <span class="w-14 uppercase" style="color:${COLORS[l]}">${l}</span>
+      <div class="bar flex-1"><i style="width:0%;background:${COLORS[l]};box-shadow:0 0 8px ${COLORS[l]}" data-w="${s.risk_distribution[l]/max*100}"></i></div>
+      <span class="w-8 text-right text-slate-300">${s.risk_distribution[l]}</span>
+    </div>`).join("");
+  show("resultView");
+  requestAnimationFrame(() => requestAnimationFrame(() =>
+    document.querySelectorAll("#dist i").forEach(i => i.style.width = i.dataset.w + "%")));
+
+  activeLevel = "all"; $("search").value = "";
+  drawFilters();
+  $("trunc").classList.toggle("hidden", !s.truncated);
+  if (s.truncated) $("trunc").textContent = "Showing the top 1,000 highest-risk flags.";
+  drawIncidents();
+  drawTable();
+}
+function drawFilters() {
+  $("filters").innerHTML = ["all", ...LEVELS].map(l =>
+    `<button data-l="${l}" class="mono text-xs uppercase px-3 py-1.5 rounded-full border ${l===activeLevel?'border-cyan-400 text-cyan-300 bg-cyan-400/10':'border-white/10 text-slate-400'}">${l}</button>`).join("");
+  document.querySelectorAll("#filters button").forEach(b => b.onclick = () => { activeLevel = b.dataset.l; drawFilters(); drawTable(); });
+}
+
+// executive summary + incident cards (JSON triage mode)
+function drawIncidents() {
+  const box = $("incidents");
+  if (!isAlerts()) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  const s = DATA.summary, rep = DATA.report || {}, incs = arr(rep.incidents);
+  const inTable = new Set(DATA.flagged.map(r => r.label));
+  const files = arr(s.files).map(f => {
+    const kinds = Object.entries(f.kinds || {}).filter(([, n]) => n).map(([k, n]) => `${n.toLocaleString()} ${k}`).join(", ");
+    const notes = [f.skipped ? `${f.skipped.toLocaleString()} unreadable` : "", f.no_timestamp ? `${f.no_timestamp.toLocaleString()} without a timestamp (ordered by line)` : ""].filter(Boolean).join(", ");
+    return `<li><span class="text-slate-300">${esc(f.name)}</span>: ${kinds || "no records"}${notes ? ` <span class="text-amber-300">(${esc(notes)})</span>` : ""}</li>`;
+  }).join("");
+
+  let html = `
+    <div class="panel p-5 sm:p-6 reveal">
+      <h3 class="font-bold text-lg mb-2">What was found</h3>
+      <p class="text-slate-200 leading-relaxed max-w-3xl">${esc(rep.executive_summary || (s.flags_detected ? "Suspicious activity was flagged. See the table below." : "No suspicious activity was found."))}</p>
+      ${s.llm_errors ? `<p class="mono text-xs text-amber-300 mt-3">${s.llm_errors} model repl${s.llm_errors === 1 ? "y was" : "ies were"} unreadable and treated as not suspicious${s.last_llm_error ? ": " + esc(s.last_llm_error) : ""}. Re-run to retry.</p>` : ""}
+      ${s.eval && !s.eval.error ? `<p class="mono text-xs text-slate-400 mt-3">Against labels: precision ${(s.eval.precision*100).toFixed(1)}%, recall ${(s.eval.recall*100).toFixed(1)}%, F1 ${(s.eval.f1*100).toFixed(1)}%</p>` : ""}
+      ${s.eval && s.eval.error ? `<p class="mono text-xs text-amber-300 mt-3">Label scoring failed: ${esc(s.eval.error)}</p>` : ""}
+      <details class="mt-4"><summary class="mono text-xs text-slate-400 cursor-pointer hover:text-white select-none">Files read (${arr(s.files).length})</summary>
+        <ul class="mono text-xs text-slate-500 mt-2 space-y-1">${files}</ul></details>
+    </div>`;
+
+  html += incs.map((inc, n) => {
+    const sev = sevOf(inc.severity), conf = Number(inc.confidence);
+    const confTxt = Number.isFinite(conf) ? Math.round((conf <= 1 ? conf * 100 : conf)) + "% confidence" : "";
+    const ev = arr(inc.evidence_event_ids).map(String);
+    const evHtml = ev.slice(0, 12).map(id => inTable.has(id)
+      ? `<button data-ev="${esc(id)}" class="mono text-[10px] px-2 py-0.5 rounded border border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10">${esc(id)}</button>`
+      : `<span class="mono text-[10px] px-2 py-0.5 rounded border border-white/10 text-slate-500" title="Not in the flagged table">${esc(id)}</span>`).join(" ");
+    const when = [inc.time_start, inc.time_end].filter(Boolean).map(esc).join(" → ");
+    return `
+    <article class="panel p-5 sm:p-6 reveal" style="border-left:3px solid ${COLORS[sev]}; animation-delay:${Math.min(n, 6) * 60}ms">
+      <div class="flex items-start justify-between gap-3 flex-wrap">
+        <div class="min-w-0">
+          <h3 class="font-bold text-lg">${esc(inc.title || "Incident " + (n + 1))}</h3>
+          <p class="mono text-xs text-slate-500 mt-0.5">${when}${inc.attack_stage ? (when ? " · " : "") + esc(inc.attack_stage) : ""}</p>
+        </div>
+        <div class="flex items-center gap-3"><span class="badge b-${sev}">${sev}</span><span class="mono text-xs text-slate-400">${confTxt}</span></div>
+      </div>
+      <p class="mt-4 text-slate-200 leading-relaxed max-w-3xl"><span class="block mono text-[11px] text-slate-500 mb-1">Why it was flagged</span>${esc(inc.explanation)}</p>
+      ${arr(inc.affected).length ? `<div class="mt-4 flex flex-wrap gap-1.5 items-center"><span class="mono text-[11px] text-slate-500 mr-1">Affected</span>${arr(inc.affected).map(a => `<span class="mono text-[11px] px-2 py-0.5 rounded border border-pink-400/40 text-pink-300">${esc(a)}</span>`).join("")}</div>` : ""}
+      ${arr(inc.recommended_actions).length ? `<div class="mt-4"><span class="block mono text-[11px] text-slate-500 mb-1">Recommended next steps</span><ul class="list-disc pl-5 text-sm text-slate-300 space-y-0.5">${arr(inc.recommended_actions).map(a => `<li>${esc(a)}</li>`).join("")}</ul></div>` : ""}
+      ${ev.length ? `<div class="mt-4 flex flex-wrap gap-1.5 items-center"><span class="mono text-[11px] text-slate-500 mr-1">Evidence</span>${evHtml}${ev.length > 12 ? `<span class="mono text-[10px] text-slate-500">+${ev.length - 12} more</span>` : ""}</div>` : ""}
+    </article>`;
+  }).join("");
+
+  box.innerHTML = html;
+  box.classList.remove("hidden");
+  box.querySelectorAll("[data-ev]").forEach(b => b.onclick = () => jumpToEvent(b.dataset.ev));
+}
+function jumpToEvent(id) {
+  const r = DATA.flagged.find(x => x.label === id);
+  if (!r) return;
+  activeLevel = "all"; $("search").value = ""; drawFilters(); drawTable();
+  const tr = document.querySelector(`#tbody tr[data-i="${r.row}"]`);
+  if (!tr) return;
+  $("d" + r.row).classList.remove("hidden");
+  tr.scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block: "center"});
+  tr.style.background = "rgba(34,243,255,.14)";
+  setTimeout(() => tr.style.background = "", 1800);
+}
+
+function drawTable() {
+  const A = isAlerts();
+  const q = $("search").value.toLowerCase();
+  let rows = DATA.flagged.filter(r =>
+    (activeLevel === "all" || r.risk_level === activeLevel) &&
+    (!q || JSON.stringify(r.values).toLowerCase().includes(q) || r.reasons.join(" ").toLowerCase().includes(q) ||
+     (r.detail && String(r.detail.rationale).toLowerCase().includes(q))));
+  const order = {critical:4, high:3, medium:2, low:1};
+  rows.sort((a,b) => {
+    const x = sortKey==="risk_level" ? order[a.risk_level] : a[sortKey];
+    const y = sortKey==="risk_level" ? order[b.risk_level] : b[sortKey];
+    return (x - y) * sortDir;
+  });
+  $("count").textContent = `${rows.length} shown`;
+  const why = r => A
+    ? `<div class="font-semibold text-slate-100 mb-1">${esc(r.reasons[0])}</div>` +
+      r.reasons.slice(1).map(x => `<div class="mb-0.5">• ${esc(x)}</div>`).join("") +
+      (r.detail && r.detail.rationale ? `<div class="text-xs text-slate-400 mt-1.5 line-clamp-2">${esc(r.detail.rationale)}</div>` : "")
+    : r.reasons.map(x => `<div class="mb-0.5">• ${esc(x)}</div>`).join("");
+  const detail = r => {
+    const d = r.detail; if (!d) return "";
+    const fp = arr(d.false_positive_factors);
+    return `<div class="mb-3 text-sm text-slate-300 leading-relaxed">
+      <div class="mono text-[11px] text-slate-500 mb-1">${esc(r.label)}${d.attack_stage ? " · stage: " + esc(d.attack_stage) : ""}</div>
+      <div>${esc(d.rationale)}</div>
+      ${fp.length ? `<div class="mt-2 text-xs text-slate-400">Could be benign because: ${fp.map(esc).join("; ")}</div>` : ""}</div>`;
+  };
+  $("tbody").innerHTML = rows.length ? rows.map((r, i) => `
+    <tr class="align-top cursor-pointer" data-i="${r.row}" style="animation:rise .4s ${Math.min(i,20)*25}ms both">
+      <td class="px-4 py-3 mono text-slate-300">#${r.row}</td>
+      <td class="px-4 py-3 w-40">
+        <div class="mono font-bold" style="color:${COLORS[r.risk_level]}">${r.risk_score}</div>
+        <div class="bar mt-1"><i style="width:${r.risk_score}%;background:${COLORS[r.risk_level]}"></i></div>
+      </td>
+      <td class="px-4 py-3"><span class="badge b-${r.risk_level}">${r.risk_level}</span></td>
+      <td class="px-4 py-3 text-slate-300">${why(r)}</td>
+      <td class="px-4 py-3">${r.signals.map(x => `<span class="mono text-[10px] px-2 py-0.5 mr-1 rounded border border-cyan-400/30 text-cyan-300">${esc(x)}</span>`).join("")}</td>
+    </tr>
+    <tr class="hidden" id="d${r.row}"><td colspan="5" class="px-4 pb-4">
+      ${detail(r)}
+      <div class="mono text-xs grid grid-cols-2 md:grid-cols-4 gap-2 bg-[#091020] rounded-lg p-3 border border-white/5">
+        ${Object.entries(r.values).map(([k,v]) => `<div><span class="text-slate-500">${esc(k)}</span><br><span class="text-slate-200 break-words">${esc(v)}</span></div>`).join("")}
+      </div></td></tr>`).join("")
+    : `<tr><td colspan="5" class="px-4 py-10 text-center text-slate-500 mono">No flagged rows match.</td></tr>`;
+  document.querySelectorAll("#tbody tr[data-i]").forEach(tr =>
+    tr.onclick = () => $("d" + tr.dataset.i).classList.toggle("hidden"));
+}
+$("search").oninput = drawTable;
+document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
+  const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : -1; sortKey = k; drawTable();
+});
+
+// ---- export
+function download(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+$("exportBtn").onclick = () => {
+  if (!DATA) return;
+  const A = isAlerts(), cols = DATA.columns;
+  const cell = v => { v = v == null ? "" : String(v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;   // block CSV formula injection
+                      return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v; };
+  const head = ["row","risk_score","risk_level","reasons", ...(A ? ["explanation"] : []), ...cols];
+  const lines = [head.map(cell).join(",")];
+  DATA.flagged.forEach(r => lines.push([r.row, r.risk_score, r.risk_level, r.reasons.join(" | "),
+    ...(A ? [r.detail ? r.detail.rationale : ""] : []), ...cols.map(c => r.values[c])].map(cell).join(",")));
+  download(new Blob([lines.join("\n")], {type:"text/csv"}), A ? "flagged_alerts.csv" : "flagged_" + lastFileName);
+};
+$("exportJsonBtn").onclick = () => {
+  if (!DATA) return;
+  download(new Blob([JSON.stringify({summary: DATA.summary, report: DATA.report, flagged: DATA.flagged}, null, 2)],
+    {type: "application/json"}), "incident_report.json");
+};
+
+setMode("alerts");
+drawQueue();
+</script>
+</body>
+</html>
