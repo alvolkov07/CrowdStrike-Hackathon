@@ -202,7 +202,7 @@ def call_json(system, user, max_tokens=1200):
         raise ValueError(f"{MODEL} returned an empty response")
     return _extract_json(txt)
 
-def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=300):
+def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=30):
     # Kept for app.py (it expects event-level flags + per-cluster verdicts).
     df = score_events(df)
     df = cluster_events(df)
