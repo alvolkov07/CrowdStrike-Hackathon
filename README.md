@@ -1,4 +1,2 @@
 # CrowdStrike-Hackathon
-PLACEHOLDER
 
-EE
