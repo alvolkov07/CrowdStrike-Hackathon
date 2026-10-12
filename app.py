@@ -11,7 +11,7 @@ Endpoints:
     POST /api/alerts/scan               any JSON / JSONL files (field `files`) -> background job (detector.py)
     GET  /api/alerts/jobs/{job_id}      poll job progress / fetch result
     GET  /api/health
-    GET  /                              serves ../frontend/index.html
+    GET  /                              serves ./index.html
 """
 import importlib.util
 import inspect
@@ -40,7 +40,7 @@ MAX_ROWS = 200_000                  # keep scans snappy
 MAX_FLAGS_RETURNED = 1000           # cap payload size
 Z_RULE_THRESHOLD = 4.0              # robust z-score that flags a row on its own
 RARE_CATEGORY_FREQ = 0.01           # categories under 1% of rows count as "rare"
-FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+FRONTEND = Path(__file__).resolve().parent / "index.html"
 
 app = FastAPI(title="Red Flag Detector", version="1.0.0")
 app.add_middleware(
@@ -796,4 +796,4 @@ def alerts_job(job_id: str):
 def index():
     if FRONTEND.exists():
         return FileResponse(FRONTEND)
-    raise HTTPException(404, "frontend/index.html not found")
+    raise HTTPException(404, "index.html not found")
