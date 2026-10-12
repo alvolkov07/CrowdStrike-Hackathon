@@ -186,7 +186,6 @@ def call_json(system, user, max_tokens=1200):
     txt = resp["choices"][0]["message"]["content"]
     if not txt:
         raise ValueError(f"{MODEL} returned an empty response")
-    txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
     return json.loads(txt)
 
 def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=300):
