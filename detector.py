@@ -275,7 +275,7 @@ def evaluate(df, labels_path, scenario):
 def _iso(ts):
     return datetime.fromtimestamp(float(ts), timezone.utc).isoformat()
 
-def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=300, source_files=None):
+def summarize_suspicious(df, auto_benign_below=0.12, max_llm_clusters=30, source_files=None):
     """Score + cluster + LLM-triage, then return a compact summary of suspicious activity.
     A bad model reply on one cluster is recorded as a note instead of crashing the run.
     No event-level flags, CSVs or label evaluation are produced."""
