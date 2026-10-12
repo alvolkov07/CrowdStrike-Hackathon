@@ -28,6 +28,20 @@ acceleration, install a build configured for your hardware as described in the
 
 ## Run
 
+### Start the website
+
+From the repository folder, install the web dependencies and start FastAPI:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
+.\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8000
+```
+
+Open [http://localhost:8000](http://localhost:8000). The CSV anomaly scanner
+works with the web dependencies. JSON alert triage also requires
+`llama-cpp-python` and `huggingface_hub` from `requirements.txt`; its first run
+downloads the model described above.
+
 For example, analyze the `fox` dataset:
 
 ```powershell
