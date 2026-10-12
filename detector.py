@@ -10,7 +10,6 @@ Usage:
 labels.csv is used ONLY for evaluation, never shown to the agents.
 """
 import argparse, json, math, os, re
-from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 import pandas as pd  # (for JSON-array files also: pip install ijson)
