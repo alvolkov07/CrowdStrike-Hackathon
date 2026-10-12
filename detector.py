@@ -8,15 +8,30 @@ Usage:
          --labels Data/labels.csv --scenario fox
 
 labels.csv is used ONLY for evaluation, never shown to the agents.
+Requires `pip install llama-cpp-python huggingface_hub`. The ~3.8 GB model is downloaded
+and cached on the first LLM request.
 """
 import argparse, json, math, os, re
 from datetime import datetime, timezone
+from typing import Optional
 
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
 import pandas as pd  # (for JSON-array files also: pip install ijson)
 
-MODEL = "Qwen/Qwen2.5-7B-Instruct"
-_tokenizer = None
-_model = None
+MODEL = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+MODEL_FILE = "qwen2.5-7b-instruct-q3_k_m.gguf"
+client: Optional[Llama] = None
+
+def get_client() -> Llama:
+    global client
+    if client is None:
+        client = Llama(
+            model_path=hf_hub_download(repo_id=MODEL, filename=MODEL_FILE),
+            n_ctx=8192,
+            verbose=False,
+        )
+    return client
 
 # 1. INGEST + NORMALIZE  (adjust field names to your files)
 
@@ -53,7 +68,7 @@ def normalize_wazuh(r, i):
     sur = data.get("alert", {}) if isinstance(data.get("alert"), dict) else {}
     desc = sur.get("signature") or rule.get("description", "")
     return dict(
-        id=f"wazuh-{i}", ts=parse_ts(r["timestamp"]),
+        id=f"wazuh-{i}", ts=parse_ts(r.get("timestamp") or r["@timestamp"]),
         source="suricata" if sur else "wazuh",
         rule_id=str(sur.get("signature_id") or rule.get("id", "")),
         level=int(rule.get("level", 0)), desc=desc,
@@ -161,44 +176,16 @@ Respond with JSON only, no prose or code fences:
  "false_positive_factors": [str], "evidence_event_ids": [str], "rationale": str}"""
 
 def call_json(system, user, max_tokens=1200):
-    global _model, _tokenizer
-    try:
-        import torch
-    except ImportError as e:
-        raise RuntimeError(
-            "Qwen dependencies are missing. Install them with "
-            "'python -m pip install -r requirements.txt'."
-        ) from e
-
-    if _model is None or _tokenizer is None:
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-        except ImportError as e:
-            raise RuntimeError(
-                "Qwen dependencies are missing. Install them with "
-                "'python -m pip install -r requirements.txt'."
-            ) from e
-
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL)
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        _model = AutoModelForCausalLM.from_pretrained(
-            MODEL, torch_dtype=dtype, device_map="auto"
-        )
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-    inputs = _tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt"
-    ).to(_model.device)
-    with torch.inference_mode():
-        output = _model.generate(
-            inputs, max_new_tokens=max_tokens, do_sample=False
-        )
-    txt = _tokenizer.decode(
-        output[0, inputs.shape[-1]:], skip_special_tokens=True
+    resp = get_client().create_chat_completion(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=max_tokens,
     )
+    txt = resp["choices"][0]["message"]["content"]
+    if not txt:
+        raise ValueError(f"{MODEL} returned an empty response")
     txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
     return json.loads(txt)
 

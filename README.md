@@ -1,15 +1,15 @@
 # CrowdStrike Hackathon
 
 Analyze AIT alerts from AMiner and Wazuh, triage suspicious clusters with
-Qwen 2.5 7B Instruct, and produce an incident report.
+the Qwen 2.5 7B Instruct GGUF model locally, and produce an incident report.
 
 ## Requirements
 
 - Python 3.10 or 3.11
-- About 16 GB or more of NVIDIA GPU memory is recommended for the 7B model.
-  CPU inference is supported but can be very slow and memory-intensive.
-- The first run downloads the Qwen model weights from Hugging Face (roughly
-  15 GB).
+- The first LLM request downloads the Qwen GGUF model from Hugging Face
+  (roughly 3.8 GB) and caches it locally.
+- Inference runs on your computer through llama.cpp; CPU inference is supported
+  but can be slow. The model uses several gigabytes of memory while running.
 
 ## Windows setup
 
@@ -22,9 +22,9 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If PyTorch does not detect your NVIDIA GPU, install the PyTorch build that
-matches your CUDA setup using the selector at
-[pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/).
+The default `llama-cpp-python` installation uses CPU inference. For GPU
+acceleration, install a build configured for your hardware as described in the
+[llama-cpp-python installation guide](https://llama-cpp-python.readthedocs.io/en/latest/).
 
 ## Run
 
