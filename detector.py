@@ -2,10 +2,10 @@
 AIT alert dataset -> Detector agent -> Explainer agent
 
 Usage:
-  pip install anthropic pandas
-  export ANTHROPIC_API_KEY=...
-  python ait_agent_pipeline.py --aminer fox_aminer.json --wazuh fox_wazuh.json \
-         --out out/ [--labels labels.csv --scenario fox]
+  pip install -r requirements.txt
+  python detector.py --aminer Data/ait_ads/fox_aminer.json \
+         --wazuh Data/ait_ads/fox_wazuh.json --out out/ \
+         --labels Data/labels.csv --scenario fox
 
 labels.csv is used ONLY for evaluation, never shown to the agents.
 """
@@ -13,10 +13,10 @@ import argparse, json, math, os, re
 from datetime import datetime, timezone
 
 import pandas as pd  # (for JSON-array files also: pip install ijson)
-import anthropic
 
-MODEL = "claude-sonnet-5-5"
-client = anthropic.Anthropic()
+MODEL = "Qwen/Qwen2.5-7B-Instruct"
+_tokenizer = None
+_model = None
 
 # 1. INGEST + NORMALIZE  (adjust field names to your files)
 
@@ -161,10 +161,44 @@ Respond with JSON only, no prose or code fences:
  "false_positive_factors": [str], "evidence_event_ids": [str], "rationale": str}"""
 
 def call_json(system, user, max_tokens=1200):
-    resp = client.messages.create(
-        model=MODEL, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": user}])
-    txt = "".join(b.text for b in resp.content if b.type == "text")
+    global _model, _tokenizer
+    try:
+        import torch
+    except ImportError as e:
+        raise RuntimeError(
+            "Qwen dependencies are missing. Install them with "
+            "'python -m pip install -r requirements.txt'."
+        ) from e
+
+    if _model is None or _tokenizer is None:
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as e:
+            raise RuntimeError(
+                "Qwen dependencies are missing. Install them with "
+                "'python -m pip install -r requirements.txt'."
+            ) from e
+
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL)
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        _model = AutoModelForCausalLM.from_pretrained(
+            MODEL, torch_dtype=dtype, device_map="auto"
+        )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    inputs = _tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    ).to(_model.device)
+    with torch.inference_mode():
+        output = _model.generate(
+            inputs, max_new_tokens=max_tokens, do_sample=False
+        )
+    txt = _tokenizer.decode(
+        output[0, inputs.shape[-1]:], skip_special_tokens=True
+    )
     txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
     return json.loads(txt)
 
@@ -177,12 +211,7 @@ def detector_agent(df, auto_benign_below=0.12, max_llm_clusters=300):
     to_review = summ[summ["max"] >= auto_benign_below].sort_values("max", ascending=False)
     for cid in to_review.index[:max_llm_clusters]:
         g = df[df.cluster == cid]
-        try:
-            verdicts[cid] = call_json(DETECTOR_SYSTEM, json.dumps(cluster_brief(g)))
-        except Exception as e:  # fail open to the heuristic, but record it
-            verdicts[cid] = {"suspicious": bool(g.score.max() > 0.5), "confidence": 0.3,
-                             "attack_stage": None, "false_positive_factors": [],
-                             "evidence_event_ids": [], "rationale": f"LLM error: {e}"}
+        verdicts[cid] = call_json(DETECTOR_SYSTEM, json.dumps(cluster_brief(g)))
     # Event-level flags: inherit cluster verdict, require the event itself to matter
     sus = {c: v for c, v in verdicts.items() if v["suspicious"]}
     evidence = {e for v in sus.values() for e in v["evidence_event_ids"]}
